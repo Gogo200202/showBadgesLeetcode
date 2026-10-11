@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 /**
- * Fetch LeetCode badges via GraphQL and inject into index.html.
- * Replaces the Python version; runs with Node (available on GitHub Actions runners).
+ * Fetch LeetCode badges via GraphQL and stats SVG, inject into index.html.
  */
 
 import { readFileSync, writeFileSync } from 'fs';
@@ -9,6 +8,7 @@ import { resolve } from 'path';
 
 const USERNAME = 'Gogo200202';
 const GRAPHQL = 'https://leetcode.com/graphql';
+const STATS_API = 'https://leetcode-stats-six.vercel.app/api';
 const QUERY = `
 query userBadges($username: String!) {
   matchedUser(username: $username) {
@@ -32,6 +32,8 @@ const CATEGORY_LABELS = {
 const CATEGORY_ORDER = Object.keys(CATEGORY_LABELS);
 const START = '<!--BADGES:START-->';
 const END = '<!--BADGES:END-->';
+const STATS_START = '<!--STATS:START-->';
+const STATS_END = '<!--STATS:END-->';
 const INDEX = resolve('index.html');
 
 async function fetchBadges() {
@@ -50,6 +52,15 @@ async function fetchBadges() {
   return matched.badges || [];
 }
 
+async function fetchStatsSvg() {
+  const url = `${STATS_API}?username=${USERNAME}&theme=dark`;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) badges-page' },
+  });
+  if (!res.ok) throw new Error(`stats fetch failed: ${res.status}`);
+  return res.text();
+}
+
 function esc(s) {
   return String(s)
     .replace(/&/g, '&')
@@ -59,7 +70,7 @@ function esc(s) {
     .replace(/'/g, "'");
 }
 
-function render(badges) {
+function renderBadges(badges) {
   const grouped = {};
   for (const b of badges) {
     (grouped[b.category] ||= []).push(b);
@@ -107,6 +118,14 @@ function render(badges) {
   return parts.join('');
 }
 
+function renderStats(svg) {
+  // Extract just the SVG content, wrap in a container
+  return `
+<div class="stats-section" style="margin-top: clamp(24px, 4vh, 48px);">
+  ${svg}
+</div>`;
+}
+
 async function main() {
   let doc;
   try {
@@ -115,24 +134,40 @@ async function main() {
     console.error(`cannot read ${INDEX}`);
     process.exit(1);
   }
-  if (!doc.includes(START) || !doc.includes(END)) {
+  if (!doc.includes(START) || !doc.includes(END) || !doc.includes(STATS_START) || !doc.includes(STATS_END)) {
     console.error('markers missing in index.html');
     process.exit(1);
   }
 
-  let payload;
+  let badgesPayload, statsPayload;
   try {
     const badges = await fetchBadges();
-    payload = render(badges);
+    badgesPayload = renderBadges(badges);
   } catch (e) {
     console.error('warning: leaving existing badges in place:', e.message);
-    process.exit(0);
   }
 
-  const [head, rest] = doc.split(START);
-  const [, tail] = rest.split(END);
-  writeFileSync(INDEX, `${head}${START}\n${payload}\n${END}${tail}`, 'utf8');
-  console.log(`inlined ${payload.length} bytes of badge markup into index.html`);
+  try {
+    const svg = await fetchStatsSvg();
+    statsPayload = renderStats(svg);
+  } catch (e) {
+    console.error('warning: leaving existing stats in place:', e.message);
+  }
+
+  if (badgesPayload) {
+    const [head, rest] = doc.split(START);
+    const [, tail] = rest.split(END);
+    doc = `${head}${START}\n${badgesPayload}\n${END}${tail}`;
+  }
+
+  if (statsPayload) {
+    const [head, rest] = doc.split(STATS_START);
+    const [, tail] = rest.split(STATS_END);
+    doc = `${head}${STATS_START}\n${statsPayload}\n${STATS_END}${tail}`;
+  }
+
+  writeFileSync(INDEX, doc, 'utf8');
+  console.log(`inlined ${badgesPayload?.length || 0} bytes badges + ${statsPayload?.length || 0} bytes stats`);
 }
 
 main().catch(e => {
